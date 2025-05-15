@@ -1,0 +1,13 @@
+ccxt
+python-binance
+transformers
+lightgbm
+pandas
+numpy
+psycopg2-binary
+backtrader
+redis
+minio
+prometheus-client
+python-dotenv
+binance-futures-connector
