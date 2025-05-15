@@ -1,13 +1,7 @@
 ccxt
-python-binance
-transformers
+scikit-learn
 lightgbm
 pandas
-numpy
+sqlalchemy
 psycopg2-binary
-backtrader
-redis
-minio
-prometheus-client
 python-dotenv
-binance-futures-connector
