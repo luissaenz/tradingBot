@@ -40,10 +40,15 @@ def calculate_metrics(order_book):
 
 
 def save_to_timescaledb(order_book, imbalance, delta_volume):
-    """Guarda los datos en TimescaleDB."""
+    """Guarda los datos en TimescaleDB si son válidos."""
+    if not order_book['bids'] or not order_book['asks']:
+        # logger.warning("Datos incompletos: bids o asks vacíos, no se guarda")
+        return
+
     try:
         conn = psycopg2.connect(
-            host=os.getenv('TIMESCALEDB_HOST', 'localhost'),
+            # Usa 'timescaledb' en Docker
+            host=os.getenv('TIMESCALEDB_HOST', 'timescaledb'),
             port=os.getenv('TIMESCALEDB_PORT', '5432'),
             database=os.getenv('TIMESCALEDB_DB', 'postgres'),
             user=os.getenv('TIMESCALEDB_USER', 'admin'),
@@ -59,14 +64,10 @@ def save_to_timescaledb(order_book, imbalance, delta_volume):
             (
                 datetime.fromtimestamp(order_book['timestamp'] / 1000.0),
                 "BTC/USDT",
-                float(order_book['bids'][0][0]
-                      ) if order_book['bids'] else None,
-                float(order_book['asks'][0][0]
-                      ) if order_book['asks'] else None,
-                float(order_book['bids'][0][1]
-                      ) if order_book['bids'] else None,
-                float(order_book['asks'][0][1]
-                      ) if order_book['asks'] else None,
+                float(order_book['bids'][0][0]),
+                float(order_book['asks'][0][0]),
+                float(order_book['bids'][0][1]),
+                float(order_book['asks'][0][1]),
                 imbalance,
                 delta_volume
             )
