@@ -91,8 +91,8 @@ def save_signal(signal, timestamp):
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO trades (order_id, timestamp, symbol, side, price, quantity)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO trades (order_id, timestamp, symbol, side, price, quantity, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 f"signal_{timestamp.strftime('%Y%m%d%H%M%S')}",
@@ -100,7 +100,8 @@ def save_signal(signal, timestamp):
                 "BTC/USDT",
                 signal,
                 0.0,
-                0.0
+                0.0,
+                'pending'
             )
         )
         conn.commit()
@@ -127,7 +128,7 @@ def save_metrics(cv_score, cv_std, timestamp):
             INSERT INTO model_metrics (timestamp, cv_score, cv_std)
             VALUES (%s, %s, %s)
             """,
-            (timestamp, float(cv_score), float(cv_std))  # Convertir a float
+            (timestamp, float(cv_score), float(cv_std))
         )
         conn.commit()
         cursor.close()

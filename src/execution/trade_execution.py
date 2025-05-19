@@ -1,215 +1,428 @@
-import os
-import asyncio
-import ccxt.async_support as ccxt
 import psycopg2
+import os
+import requests
+import hmac
+import hashlib
+import time
+from sqlalchemy import create_engine
 from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
+import json
+import psycopg2
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Cargar variables de entorno
 load_dotenv()
 
 
 class TradeExecutor:
     def __init__(self):
-        """Initialize the trade executor."""
-        self.exchange = ccxt.binance({
-            'apiKey': os.getenv('BINANCE_API_KEY'),
-            'secret': os.getenv('BINANCE_API_SECRET'),
-            'enableRateLimit': True,
-            'testnet': True  # Using testnet for safety
-        })
-        self.symbol = 'BTC/USDT'
+        """Inicializa el ejecutor de trades."""
+        self.api_key = os.getenv('BINANCE_API_KEY')
+        self.api_secret = os.getenv('BINANCE_API_SECRET')
+        self.base_url = 'https://testnet.binancefuture.com'
+        self.symbol = 'BTCUSDT'
         self.leverage = 5
-        self.risk_per_trade = 0.02  # 2% of capital per trade
-        self.sl_percentage = 0.002  # 0.2% initial stop-loss
-        self.db_params = {
-            'host': os.getenv('TIMESCALEDB_HOST', 'timescaledb'),
-            'port': os.getenv('TIMESCALEDB_PORT', '5432'),
-            'database': os.getenv('TIMESCALEDB_DB', 'postgres'),
-            'user': os.getenv('TIMESCALEDB_USER', 'admin'),
-            'password': os.getenv('TIMESCALEDB_PASSWORD', 'password')
-        }
+        self.risk_per_trade = 0.02  # 2% del capital
+        self.sl_percentage = 0.002  # 0.2% stop-loss inicial
+        self.max_retries = 3  # Máximo de reintentos para confirmar llenado
+        self.retry_delay = 5  # Segundos entre reintentos
+        self.engine = create_engine(
+            f"postgresql://admin:password@{os.getenv('TIMESCALEDB_HOST', 'timescaledb')}:{os.getenv('TIMESCALEDB_PORT', '5432')}/{os.getenv('TIMESCALEDB_DB', 'postgres')}"
+        )
 
-    async def initialize_exchange(self):
-        """Configure the exchange."""
+    def sign_request(self, params):
+        """Genera la firma HMAC-SHA256 para autenticación."""
+        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        params['signature'] = signature
+        return params
+
+    def initialize_exchange(self):
+        """Configura el exchange (apalancamiento)."""
         try:
-            await self.exchange.load_markets()
-            # Set leverage for futures trading
-            await self.exchange.fapiPrivate_post_leverage({
-                'symbol': self.symbol.replace('/', ''),
-                'leverage': self.leverage
-            })
+            endpoint = '/fapi/v1/leverage'
+            params = {
+                'symbol': self.symbol,
+                'leverage': self.leverage,
+                'timestamp': int(time.time() * 1000)
+            }
+            params = self.sign_request(params)
+            headers = {'X-MBX-APIKEY': self.api_key}
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                params=params
+            )
+            response.raise_for_status()
             logger.info(
-                f"Exchange initialized: {self.symbol}, leverage {self.leverage}x")
+                f"Exchange inicializado: {self.symbol}, leverage {self.leverage}x")
         except Exception as e:
-            logger.error(f"Error initializing exchange: {e}")
-            raise
+            logger.error(f"Error al inicializar exchange: {e}")
 
-    async def get_account_balance(self):
-        """Get the account balance."""
+    def get_account_balance(self):
+        """Obtiene el balance de USDT."""
         try:
-            balance = await self.exchange.fapiPrivate_get_balance()
-            for asset in balance:
+            endpoint = '/fapi/v2/balance'
+            params = {'timestamp': int(time.time() * 1000)}
+            params = self.sign_request(params)
+            headers = {'X-MBX-APIKEY': self.api_key}
+            response = requests.get(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                params=params
+            )
+            response.raise_for_status()
+            balances = response.json()
+            for asset in balances:
                 if asset['asset'] == 'USDT':
-                    return float(asset['availableBalance'])
-            logger.error("USDT not found in balance")
+                    balance = float(asset['availableBalance'])
+                    logger.info(f"Balance USDT: {balance}")
+                    return balance
+            logger.error("USDT no encontrado en balance")
             return 0.0
         except Exception as e:
-            logger.error(f"Error getting balance: {e}")
+            logger.error(f"Error al obtener balance: {e}")
             return 0.0
+
+    def check_open_positions(self, side):
+        """Verifica posiciones abiertas para evitar acumulación de riesgo."""
+        try:
+            endpoint = '/fapi/v2/positionRisk'
+            params = {'symbol': self.symbol,
+                      'timestamp': int(time.time() * 1000)}
+            params = self.sign_request(params)
+            headers = {'X-MBX-APIKEY': self.api_key}
+            response = requests.get(
+                f"{self.base_url}{endpoint}", headers=headers, params=params)
+            response.raise_for_status()
+            positions = response.json()
+            for pos in positions:
+                if pos['symbol'] == self.symbol and float(pos['positionAmt']) != 0:
+                    position_side = 'BUY' if float(
+                        pos['positionAmt']) > 0 else 'SELL'
+                    if position_side == side.upper():
+                        logger.warning(
+                            f"Posición abierta existente: {position_side}, cantidad={pos['positionAmt']}")
+                        return False
+            logger.info("No hay posiciones abiertas en la misma dirección")
+            return True
+        except Exception as e:
+            logger.error(f"Error al verificar posiciones: {e}")
+            return False
 
     def fetch_pending_signals(self):
-        """Extract pending signals from TimescaleDB."""
+        """Extrae señales pendientes de TimescaleDB."""
         try:
-            conn = psycopg2.connect(**self.db_params)
             query = """
             SELECT order_id, timestamp, symbol, side
             FROM trades
-            WHERE price = 0 AND quantity = 0
+            WHERE status = 'pending' AND price = 0 AND quantity = 0
             ORDER BY timestamp DESC LIMIT 1
             """
-            df = pd.read_sql(query, conn)
-            conn.close()
-            logger.info(f"Pending signals extracted: {len(df)}")
+            df = pd.read_sql(query, self.engine)
+            logger.info(f"Señales pendientes extraídas: {len(df)}")
             return df
         except Exception as e:
-            logger.error(f"Error extracting signals: {e}")
+            logger.error(f"Error al extraer señales: {e}")
             return pd.DataFrame()
 
-    async def calculate_quantity(self, price, balance):
-        """Calculate the trading quantity."""
+    def get_current_price(self):
+        """Obtiene el precio actual del símbolo."""
+        try:
+            endpoint = '/fapi/v1/ticker/price'
+            params = {'symbol': self.symbol}
+            response = requests.get(
+                f"{self.base_url}{endpoint}", params=params)
+            response.raise_for_status()
+            price = float(response.json()['price'])
+            logger.info(f"Precio actual: {price}")
+            return price
+        except Exception as e:
+            logger.error(f"Error al obtener precio: {e}")
+            return 0.0
+
+    def calculate_quantity(self, price, balance):
+        """Calcula la cantidad a operar."""
         try:
             capital = balance * self.risk_per_trade
             quantity = (capital * self.leverage) / price
-            # Adjust precision according to Binance requirements
-            return round(quantity, 3)
+            quantity = round(quantity, 3)
+            logger.info(
+                f"Cantidad calculada: {quantity} (capital={capital}, leverage={self.leverage}, price={price})")
+            return quantity
         except Exception as e:
-            logger.error(f"Error calculating quantity: {e}")
+            logger.error(f"Error al calcular cantidad: {e}")
             return 0.0
 
-    async def set_stop_loss(self, side, entry_price):
-        """Calculate stop-loss price."""
+    def set_stop_loss(self, side, entry_price):
+        """Calcula el precio de stop-loss."""
         try:
             if side == 'buy':
                 sl_price = entry_price * (1 - self.sl_percentage)
             else:
                 sl_price = entry_price * (1 + self.sl_percentage)
-            return round(sl_price, 2)
+            sl_price = round(sl_price, 2)
+            logger.info(
+                f"Stop-loss calculado: {sl_price} (side={side}, entry_price={entry_price})")
+            return sl_price
         except Exception as e:
-            logger.error(f"Error calculating stop-loss: {e}")
+            logger.error(f"Error al calcular stop-loss: {e}")
             return 0.0
 
-    async def execute_trade(self, signal):
-        """Execute a trade based on the signal."""
+    def get_trade_details(self, order_id):
+        """Consulta detalles del llenado de la orden."""
         try:
-            side = signal['side']
-            await self.exchange.load_markets()
-            ticker = await self.exchange.fetch_ticker(self.symbol)
-            price = ticker['last']
+            endpoint = '/fapi/v1/userTrades'
+            params = {
+                'symbol': self.symbol,
+                'orderId': order_id,
+                'timestamp': int(time.time() * 1000)
+            }
+            params = self.sign_request(params)
+            headers = {'X-MBX-APIKEY': self.api_key}
+            response = requests.get(
+                f"{self.base_url}{endpoint}", headers=headers, params=params)
+            response.raise_for_status()
+            trades = response.json()
+            if trades:
+                avg_price = sum(float(t['price']) * float(t['qty'])
+                                for t in trades) / sum(float(t['qty']) for t in trades)
+                total_qty = sum(float(t['qty']) for t in trades)
+                logger.info(
+                    f"Trade details: orderId={order_id}, avgPrice={avg_price}, totalQty={total_qty}")
+                return avg_price, total_qty
+            logger.warning(f"No se encontraron trades para orderId={order_id}")
+            return 0.0, 0.0
+        except Exception as e:
+            logger.error(f"Error al obtener detalles del trade: {e}")
+            return 0.0, 0.0
 
-            balance = await self.get_account_balance()
+    def archive_old_trades(self):
+        """Archiva trades antiguos (>30 días) y los elimina de trades."""
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv('TIMESCALEDB_HOST', 'timescaledb'),
+                port=os.getenv('TIMESCALEDB_PORT', '5432'),
+                database=os.getenv('TIMESCALEDB_DB', 'postgres'),
+                user=os.getenv('TIMESCALEDB_USER', 'admin'),
+                password=os.getenv('TIMESCALEDB_PASSWORD', 'password')
+            )
+            cursor = conn.cursor()
+            # Crear tabla trades_archive si no existe
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trades_archive (
+                    order_id TEXT PRIMARY KEY,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    price FLOAT NOT NULL,
+                    quantity FLOAT NOT NULL,
+                    status TEXT NOT NULL
+                );
+            """)
+            # Archivar trades antiguos
+            cursor.execute("""
+                INSERT INTO trades_archive
+                SELECT * FROM trades
+                WHERE timestamp < %s
+                ON CONFLICT (order_id) DO NOTHING;
+            """, (datetime.now() - timedelta(days=30),))
+            archived_count = cursor.rowcount
+            # Eliminar trades archivados
+            cursor.execute("""
+                DELETE FROM trades
+                WHERE timestamp < %s;
+            """, (datetime.now() - timedelta(days=30),))
+            deleted_count = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            conn.close()
+            logger.info(
+                f"Trades archivados: {archived_count}, eliminados: {deleted_count}")
+        except Exception as e:
+            logger.error(f"Error al archivar trades: {e}")
+
+    def execute_trade(self, signal):
+        """Ejecuta un trade basado en la señal."""
+        try:
+            side = signal['side'].upper()
+            # Verificar posiciones abiertas
+            if not self.check_open_positions(side):
+                logger.error(
+                    f"No se puede ejecutar trade: posición abierta en {side}")
+                return
+
+            price = self.get_current_price()
+            if price <= 0:
+                logger.error("Precio inválido")
+                return
+
+            balance = self.get_account_balance()
             if balance <= 0:
-                logger.error("Insufficient balance")
+                logger.error("Balance insuficiente")
                 return
 
-            quantity = await self.calculate_quantity(price, balance)
+            quantity = self.calculate_quantity(price, balance)
             if quantity <= 0:
-                logger.error("Invalid quantity")
+                logger.error("Cantidad inválida")
                 return
 
-            sl_price = await self.set_stop_loss(side, price)
+            sl_price = self.set_stop_loss(side.lower(), price)
+            if sl_price <= 0:
+                logger.error("Stop-loss inválido")
+                return
 
-            # Execute market order
-            if side == 'buy':
-                order = await self.exchange.create_market_buy_order(self.symbol, quantity)
-            else:
-                order = await self.exchange.create_market_sell_order(self.symbol, quantity)
+            # Crear  Crear orden de mercado
+            endpoint = '/fapi/v1/order'
+            params = {
+                'symbol': self.symbol,
+                'side': side,
+                'type': 'MARKET',
+                'quantity': quantity,
+                'timestamp': int(time.time() * 1000)
+            }
+            params = self.sign_request(params)
+            headers = {'X-MBX-APIKEY': self.api_key}
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                params=params
+            )
+            response.raise_for_status()
+            order = response.json()
+            logger.info(f"Respuesta de orden: {json.dumps(order, indent=2)}")
 
-            # Record trade
-            self.save_trade(signal['order_id'], signal['timestamp'], order)
+            # Confirmar llenado con reintentos
+            final_price = float(order.get('avgPrice', 0.0))
+            final_quantity = float(
+                order.get('executedQty', order.get('origQty', 0.0)))
+            if order['status'] == 'NEW':
+                for attempt in range(self.max_retries):
+                    time.sleep(self.retry_delay)
+                    avg_price, total_qty = self.get_trade_details(
+                        order['orderId'])
+                    if avg_price > 0 and total_qty > 0:
+                        final_price = avg_price
+                        final_quantity = total_qty
+                        break
+                    logger.warning(
+                        f"Intento {attempt + 1}/{self.max_retries}: No se encontraron detalles del trade")
+                else:
+                    logger.warning(
+                        f"Reintentos agotados, usando market_price={price}, calculated_quantity={quantity}")
+                    final_price = price
+                    final_quantity = quantity
 
-            # Set stop-loss order
-            if sl_price > 0:
-                sl_side = 'sell' if side == 'buy' else 'buy'
-                await self.exchange.create_stop_loss_order(self.symbol, sl_side, quantity, sl_price)
+            # Guardar trade
+            self.save_trade(
+                signal['order_id'], signal['timestamp'], final_price, final_quantity)
+
+            # Crear orden stop-loss
+            sl_side = 'SELL' if side == 'BUY' else 'BUY'
+            sl_params = {
+                'symbol': self.symbol,
+                'side': sl_side,
+                'type': 'STOP_MARKET',
+                'quantity': quantity,
+                'stopPrice': sl_price,
+                'timestamp': int(time.time() * 1000)
+            }
+            sl_params = self.sign_request(sl_params)
+            sl_response = requests.post(
+                f"{self.base_url}{endpoint}",
+                headers=headers,
+                params=sl_params
+            )
+            sl_response.raise_for_status()
+            logger.info(f"Stop-loss creado: {sl_side}, stopPrice={sl_price}")
 
             logger.info(
-                f"Trade executed: {side}, price={price}, quantity={quantity}, sl_price={sl_price}")
+                f"Trade ejecutado: {side.lower()}, price={final_price}, quantity={final_quantity}, sl_price={sl_price}")
         except Exception as e:
-            logger.error(f"Error executing trade: {e}")
+            logger.error(f"Error al ejecutar trade: {e}")
 
-    def save_trade(self, order_id, timestamp, order):
-        """Save trade details to TimescaleDB."""
+    def save_trade(self, order_id, timestamp, price, quantity):
+        """Guarda los detalles del trade en TimescaleDB."""
         try:
-            conn = psycopg2.connect(**self.db_params)
+            conn = psycopg2.connect(
+                host=os.getenv('TIMESCALEDB_HOST', 'timescaledb'),
+                port=os.getenv('TIMESCALEDB_PORT', '5432'),
+                database=os.getenv('TIMESCALEDB_DB', 'postgres'),
+                user=os.getenv('TIMESCALEDB_USER', 'admin'),
+                password=os.getenv('TIMESCALEDB_PASSWORD', 'password')
+            )
             cursor = conn.cursor()
+            logger.info(
+                f"Guardando trade: order_id={order_id}, price={price}, quantity={quantity}")
             cursor.execute(
                 """
                 UPDATE trades
-                SET price = %s, quantity = %s
+                SET price = %s, quantity = %s, status = %s
                 WHERE order_id = %s AND timestamp = %s
                 """,
                 (
-                    float(order['price']) if 'price' in order else 0.0,
-                    float(order['amount']) if 'amount' in order else 0.0,
+                    price,
+                    quantity,
+                    'executed',
                     order_id,
                     timestamp
                 )
             )
+            if cursor.rowcount == 0:
+                logger.error(
+                    f"No se actualizó ningún trade para order_id={order_id}, timestamp={timestamp}")
+            else:
+                logger.info(
+                    f"Trade actualizado: order_id={order_id}, price={price}, quantity={quantity}")
             conn.commit()
             cursor.close()
             conn.close()
-            logger.info("Trade updated in TimescaleDB")
         except Exception as e:
-            logger.error(f"Error saving trade: {e}")
+            logger.error(f"Error al guardar trade: {e}")
 
-    async def run(self):
-        """Main loop to process signals."""
-        await self.initialize_exchange()
+    def run(self):
+        """Bucle principal para procesar señales."""
+        self.initialize_exchange()
+        while True:
+            self.archive_old_trades()  # Archivar trades antiguos
+            signals = self.fetch_pending_signals()
+            if not signals.empty:
+                for _, signal in signals.iterrows():
+                    self.execute_trade(signal)
+            else:
+                logger.info("No hay señales pendientes")
+            time.sleep(60)
+
+    def close(self):
+        """Cierra la conexión a la base de datos."""
         try:
-            while True:
-                signals = self.fetch_pending_signals()
-                if not signals.empty:
-                    for _, signal in signals.iterrows():
-                        await self.execute_trade(signal)
-                else:
-                    logger.info("No pending signals")
-                # Check for new signals every minute
-                await asyncio.sleep(60)
+            self.engine.dispose()
+            logger.info("Conexión a base de datos cerrada")
         except Exception as e:
-            logger.error(f"Error in main loop: {e}")
-            raise
-
-    async def close(self):
-        """Close the exchange connection."""
-        try:
-            await self.exchange.close()
-            logger.info("Exchange connection closed")
-        except Exception as e:
-            logger.error(f"Error closing exchange: {e}")
+            logger.error(f"Error al cerrar conexiones: {e}")
 
 
-async def main():
-    """Main function."""
+def main():
+    """Función principal."""
     executor = TradeExecutor()
     try:
-        await executor.run()
+        executor.run()
     except KeyboardInterrupt:
-        logger.info("Closing TradeExecutor due to keyboard interrupt")
-    except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
+        logger.info("Cerrando TradeExecutor")
     finally:
-        await executor.close()
+        executor.close()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

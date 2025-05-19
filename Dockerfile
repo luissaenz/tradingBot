@@ -28,7 +28,12 @@ RUN pip list | grep -q "ccxt" || pip install --no-cache-dir \
     numpy \
     sqlalchemy \
     psycopg2-binary \
-    python-dotenv
+    python-dotenv \
+    prometheus_client \
+    websockets \
+    praw \
+    requests \
+    backtrader
 
 RUN pip install scikit-learn lightgbm pandas numpy psycopg2-binary python-dotenv ccxt
 
