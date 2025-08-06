@@ -10,6 +10,7 @@
 
 ### 🏗️ Arquitectura
 - [**System Architecture**](./architecture/system-overview.md) - Visión general del sistema
+- [**Enhanced Modules Specification**](./architecture/enhanced-modules-specification.md) - Módulos institucionales actualizados
 - [**Module Specifications**](./architecture/modules/) - Especificaciones por módulo
 - [**Data Flow**](./architecture/data-flow.md) - Flujo de datos del sistema
 - [**API Specifications**](./architecture/api-specs.md) - Especificaciones de APIs
@@ -41,19 +42,34 @@
 - **Risk Management**: Gestión de riesgo avanzada con circuit breakers
 - **Auto-Optimization**: Optimización automática basada en performance
 
-## 🏗️ Arquitectura del Sistema
+## 🏗️ Arquitectura del Sistema - Grado Institucional
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Data Ingestion │───▶│ Feature Engine  │───▶│ Signal Generator│
-│  (Binance + X)  │    │ (Microstructure)│    │   (LightGBM)    │
+│  Data Ingestion │───▶│ Enhanced        │───▶│ Multi-Timeframe │
+│  (Binance + X)  │    │ Microstructure  │    │ Signal Generator│
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
          ▼                       ▼                       ▼
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│     Storage     │    │ Risk Manager    │    │ Trade Execution │
-│ (MinIO + TSDB)  │    │ (Circuit Break) │    │   (Binance)     │
+│ Institutional   │    │ Key Levels &    │    │ Dynamic Risk    │
+│ Positioning     │    │ Volatility      │    │ Management      │
+│ Analysis        │    │ Surface         │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         └───────────────────────┬───────────────────────┘
+                                 ▼
+                    ┌─────────────────┐
+                    │     Storage     │
+                    │ (MinIO + TSDB)  │
+                    └─────────────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ Risk Manager    │    │ Trade Execution │    │ Compliance &    │
+│ (Circuit Break) │    │   (Binance)     │    │ Advanced        │
+└─────────────────┘    └─────────────────┘    │ Analytics       │
+                                 └─────────────────┘
 ```
 
 ## 🚀 Quick Start
